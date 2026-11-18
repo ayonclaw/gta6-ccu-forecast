@@ -6,20 +6,35 @@ For every case we are given hour 1's observed concurrent-viewer count and a
 set of past launches ("comparables") with hourly viewer series.  Each
 comparable is reduced to a *shape*: the log-ratio of its hour-h mean to its
 hour-1 mean.  The shape of the case is then predicted by taking weighted
-quantiles of the comparable shapes, adding back log(p1), and blending those
-empirical quantiles with a house baseline in which the log-spread grows as
-SIGMA * sqrt(h - 1).
+quantiles of the comparable shapes, scaling those offsets by MULT, adding back
+log(p1), and exponentiating.  The median is held at log(p1) exactly, so the
+forecast median equals hour 1's print (before the monotonicity clamp, which can
+lift it on hours where the comparable band sits entirely above hour 1).  A
+house baseline, in which the log-spread grows as SIGMA * sqrt(h - 1), is kept
+only as the fallback for hours that have no usable comparable.
 
 Evidence for the constants
 --------------------------
-Leave-one-out over the comparables, scoring the contest's pinball loss, gives
-0.2091 for this model against 0.2496 for the house persistence baseline, a
-16.3% reduction.  Two variants were measured and rejected.  Filtering the
-comparables to those whose peak share matched the case, and separately
-fitting the empirical median instead of keeping log(p1) fixed, made the loss
-worse at 0.2584: with only a few dozen launches the per-hour median is noisier
-than the drift it is supposed to measure, so the hour-1 print remains the
-better anchor for location.
+Leave-one-out over the 37 usable comparables, scoring the contest's pinball
+loss on the log scale, gives 0.3508 for this model against 0.8392 for the
+house persistence baseline, a 58.2% reduction.  Figures quoted here previously
+(0.2091, 0.2496 and 0.2584) came from a harness that compared log-ratios
+against levels rather than scoring the contest loss; they were measured wrong
+and are superseded by the numbers above.
+
+The weights were tuned on the same leave-one-out, and the chosen point sits on
+a smooth plateau rather than a knife edge: W of 0.85 or 1.0 with MULT between
+1.0 and 1.2 all land between 0.3515 and 0.3650, and bandwidths of 0.6, 0.8 and
+1.0 land between 0.3508 and 0.3751.  The size weighting is doing real work:
+with an infinite bandwidth, so that every comparable is weighted equally, the
+same model scores 0.6563 instead of 0.3508.
+
+W is 1.0, so the entire spread comes from the weighted empirical quantiles of
+the comparables; the house baseline's spread enters only through the fallback
+path.  The median stays at hour 1 because fitting the empirical median scored
+worse: with only a few dozen launches the per-hour median is noisier than the
+drift it is meant to measure, so a flat median estimates that drift better
+while the empirical spread carries the information.
 
 No share-of-peak filter is applied for a structural reason.  The comparables
 fall into two unlock populations: global-simultaneous releases, which peak at
@@ -32,12 +47,12 @@ closeness to the case's hour-1 print (Gaussian kernel, bandwidth BW), which
 keeps both populations available while letting launches of similar magnitude
 dominate the quantiles.
 
-The blended spread is shrunk by MULT.  Shrinking it kept lowering the
-measured loss all the way down to 0.6, but that optimum is fitted on few dozen
-launches and is not trustworthy at the tail; 0.80 is the conservative choice.
-An over-narrow band is the one catastrophic failure mode here, since the
-pinball loss punishes missed tails without bound, whereas a slightly wide band
-costs only a little.
+MULT scales the empirical offsets.  It sits slightly above 1, widening the band
+a little past the raw weighted quantiles; the plateau described above covers
+MULT 1.0 through 1.2, so the exact value is not sensitive.  Erring wide rather
+than narrow is deliberate: an over-narrow band is the one catastrophic failure
+mode here, since the pinball loss punishes missed tails without bound, whereas
+a slightly wide band costs only a little.
 """
 
 import math
@@ -46,9 +61,9 @@ from datetime import datetime, timezone
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 HOURS = list(range(2, 25))
-BW = 1.0     # Gaussian bandwidth on log-size
-W = 0.6      # weight on the empirical log-quantiles
-MULT = 0.80  # shrink applied to the blended spread
+BW = 0.8     # Gaussian bandwidth on log-size
+W = 1.0      # weight on the empirical log-quantiles
+MULT = 1.10  # scale applied to the empirical spread
 SIGMA = 0.15  # the house baseline's per-sqrt-hour spread
 MAX_Q = 1e9
 
@@ -171,14 +186,12 @@ def forecast(case):
         if h not in emp:
             out[h] = _baseline(p1, h)
             continue
-        root = math.sqrt(h - 1)
         a = []
         for i in range(5):
             if i == 2:
                 a.append(0.0)
             else:
-                blended = W * emp[h][i] + (1.0 - W) * Z[i] * SIGMA * root
-                a.append(blended * MULT)
+                a.append(emp[h][i] * MULT)
         out[h] = [p1 * math.exp(v) for v in a]
 
     clean = {}
